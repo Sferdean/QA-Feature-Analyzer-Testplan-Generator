@@ -1,0 +1,1339 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QA Feature Analyzer & Testplan Generator</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React 18 & Babel für direkte Ausführung ohne Build-Tool (ideal für GitHub Pages) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Inter Font -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo } = React;
+
+    // Hilfskomponente für Lucide-Icons in Single-File HTML
+    const Icon = ({ name, className = "h-4 w-4" }) => {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (ref.current && window.lucide) {
+          ref.current.innerHTML = '';
+          const i = document.createElement('i');
+          i.setAttribute('data-lucide', name);
+          i.className = className;
+          ref.current.appendChild(i);
+          window.lucide.createIcons({ root: ref.current });
+        }
+      }, [name, className]);
+      return <span ref={ref} className="inline-flex items-center justify-center shrink-0" />;
+    };
+
+    // Schnellvorlagen für Text / User Story
+    const SAMPLE_TEMPLATES = [
+      {
+        id: 'login-2fa',
+        label: '2FA-Login',
+        platform: 'Web-App',
+        text: `Feature: Benutzer-Login mit Zwei-Faktor-Authentifizierung (2FA)
+
+User Story:
+Als registrierter Benutzer möchte ich mich mit meiner E-Mail-Adresse, meinem Passwort und einem 6-stelligen Einmalcode (TOTP) anmelden können, damit mein Konto vor unbefugtem Zugriff geschützt ist.
+
+Akzeptanzkriterien:
+1. Nach Eingabe gültiger E-Mail und Passwort wird der Nutzer zur 2FA-Code-Eingabe weitergeleitet.
+2. Der 6-stellige Code aus der Authenticator-App ist 30 Sekunden gültig.
+3. Nach 3 fehlgeschlagenen 2FA-Versuchen wird der Login für 15 Minuten gesperrt.
+4. Option "Diesem Gerät für 30 Tage vertrauen" setzt ein sicheres HttpOnly-Token.
+5. Einmalige 8-stellige Backup-Codes funktionieren als Fallback.`
+      },
+      {
+        id: 'checkout',
+        label: 'Checkout-Flow',
+        platform: 'Web-App',
+        text: `Feature: E-Commerce Warenkorb & Express-Checkout
+
+User Story:
+Als Kunde möchte ich Artikel im Warenkorb verwalten, Rabattcodes anwenden und meine Bestellung per Kreditkarte, PayPal oder Apple Pay abschließen.
+
+Akzeptanzkriterien:
+1. Mengenänderungen im Warenkorb aktualisieren Gesamtpreis, MwSt. und Versandkosten in Echtzeit.
+2. Ab 50 € Bestellwert entfallen die Versandkosten (4,99 €).
+3. Gutscheincodes werden auf Gültigkeit, Mindestbestellwert und Ablaufdatum geprüft; pro Bestellung ist nur ein Code zulässig.
+4. Bei Bestandsänderung während des Checkouts erscheint vor Zahlungsauslösung eine Warnung.
+5. Nach erfolgreicher Zahlung wird eine Bestellbestätigung angezeigt und der Warenkorb geleert.`
+      },
+      {
+        id: 'file-upload',
+        label: 'Datei-Upload & Vorschau',
+        platform: 'Web-App',
+        text: `Feature: Dokumenten-Upload mit Virenscan & Vorschau
+
+User Story:
+Als Projektmitglied möchte ich PDF-, DOCX- und PNG-Dateien per Drag & Drop hochladen, um sie mit meinem Team zu teilen.
+
+Akzeptanzkriterien:
+1. Maximale Dateigröße beträgt 25 MB pro Datei, maximal 5 Dateien gleichzeitig.
+2. Nicht unterstützte Dateitypen (z. B. .exe, .sh) werden client- und serverseitig mit klarer Fehlermeldung abgelehnt.
+3. Während des Uploads wird ein Fortschrittsbalken inklusive Abbrechen-Button angezeigt.
+4. Nach Upload läuft ein asynchroner Malware-Scan; infizierte Dateien werden automatisch in Quarantäne verschoben.`
+      }
+    ];
+
+    // Beispiel-URLs für den Link-Modus
+    const SAMPLE_URLS = [
+      {
+        label: 'E-Commerce Checkout',
+        url: 'https://shop.example.com/checkout/payment?currency=EUR&step=2',
+        focus: 'Fokus auf Zahlungsformular-Validierung, Gutscheincode-Logik, Session-Timeout & Mobile-Checkout'
+      },
+      {
+        label: 'SaaS Login & SSO',
+        url: 'https://app.example.com/auth/login?redirect=%2Fdashboard',
+        focus: 'Fokus auf OAuth/SSO-Weiterleitung, Brute-Force-Schutz, Open-Redirect-Sicherheit & Barrierefreiheit'
+      },
+      {
+        label: 'Profil & API-Keys',
+        url: 'https://portal.example.com/settings/security/api-tokens',
+        focus: 'Fokus auf Berechtigungen, Token-Generierung/-Widerruf, XSS-Schutz & Copy-to-Clipboard'
+      }
+    ];
+
+    const PLATFORMS = [
+      { id: 'Web-App', label: 'Web-App', icon: 'globe' },
+      { id: 'Mobile iOS/Android', label: 'Mobile iOS/Android', icon: 'smartphone' },
+      { id: 'API / Backend', label: 'API / Backend', icon: 'server' },
+      { id: 'Desktop', label: 'Desktop', icon: 'monitor' }
+    ];
+
+    const TEST_DEPTHS = [
+      { id: 'Smoke / Schnellcheck', label: 'Smoke / Schnellcheck', desc: 'Kernpfade & kritische Blocker (5–6 Testfälle)' },
+      { id: 'Standard (E2E & Edge Cases)', label: 'Standard (E2E & Edge Cases)', desc: 'Positiv, Negativ, Grenzwerte & UI/UX (7–9 Testfälle)' },
+      { id: 'Deep Dive (inkl. Security & Accessibility)', label: 'Deep Dive (Security & A11y)', desc: 'Umfassend inkl. OWASP-Security, WCAG & Performance (9–12 Testfälle)' }
+    ];
+
+    // WCAG 2.1 Level AA Prinzipien für den Prüfblock neben dem Website-Link-Input
+    const WCAG_PRINCIPLES = [
+      {
+        id: 'Wahrnehmbar',
+        label: '1. Wahrnehmbar (Perceivable)',
+        criteria: 'Kontraste ≥ 4.5:1 / 3:1 (SC 1.4.3, 1.4.11), Alt-Texte (1.1.1), Reflow 320px (1.4.10) & Textabstände (1.4.12)',
+        icon: 'eye'
+      },
+      {
+        id: 'Bedienbar',
+        label: '2. Bedienbar (Operable)',
+        criteria: 'Tastaturbedienbarkeit (SC 2.1.1), sichtbarer Fokus (2.4.7), keine Tastaturfallen (2.1.2) & Skip-Links',
+        icon: 'keyboard'
+      },
+      {
+        id: 'Verständlich',
+        label: '3. Verständlich (Understandable)',
+        criteria: 'Formular-Labels & Zweck (SC 1.3.5, 3.3.2), verständliche Fehlermeldungen (3.3.1, 3.3.3) & Konsistenz',
+        icon: 'message-square'
+      },
+      {
+        id: 'Robust',
+        label: '4. Robust & Screenreader (Robust)',
+        criteria: 'ARIA Name/Role/Value (SC 4.1.2), Statusmeldungen (4.1.3) & semantische Überschriften (1.3.1)',
+        icon: 'cpu'
+      }
+    ];
+
+    const WCAG_ASSISTIVE_MODES = [
+      'Screenreader (NVDA / VoiceOver)',
+      'Nur-Tastatur-Test (Tab / Shift+Tab)',
+      'Kontrast- & Zoom-Audit (200% / 400%)',
+      'Automatisierter axe-core Scan'
+    ];
+
+    // Marktvergleich 2026 für KI-Testing-Tools
+    const MARKET_AI_TOOLS = [
+      {
+        name: 'TestMu AI / KaneAI',
+        tag: 'GenAI Test-Agent',
+        strengths: 'Erstellt und pflegt komplexe E2E-Tests über natürliche Sprache, Selbstheilung bei UI-Änderungen und direkte Cloud-Browser-Ausführung.',
+        useCase: 'Enterprise-Teams mit großen Cross-Browser-Matrizen und häufigen UI-Iterationen.',
+        comparison: 'Sehr leistungsstark für Ausführung in der Cloud, erfordert aber komplettes Setup & Lizenzierung – unsere App liefert sofortige Analyse & Code ohne Lock-in.'
+      },
+      {
+        name: 'Shiplight AI',
+        tag: 'Autonome E2E-Tests',
+        strengths: 'KI-gestützte Testgenerierung direkt aus User-Flows mit visueller Verifikation und automatischer Wartung von Playwright-Tests.',
+        useCase: 'Moderne Web-Apps mit schnellen CI/CD-Release-Zyklen.',
+        comparison: 'Fokussiert primär auf laufende Web-UIs; unsere App deckt bereits die frühe Spezifikations-, Screenshot- und URL-Planungsphase ab.'
+      },
+      {
+        name: 'Testsigma',
+        tag: 'Low-Code + KI',
+        strengths: 'NLP-basierte Test-Erstellung für Web, Mobile und APIs mit integrierter Testdaten-Generierung und CI/CD-Integration.',
+        useCase: 'QA-Teams mit gemischten Programmierkenntnissen.',
+        comparison: 'All-in-One-Plattform mit eigenem Hosting; hier erhältst du dagegen sofort portablen Standard-Code (Playwright/Cypress/Selenium).'
+      },
+      {
+        name: 'CloudQA',
+        tag: 'Regression & Monitoring',
+        strengths: 'Kombiniert automatisierte Regressionstests mit synthetischem Produktions-Monitoring und KI-gestützter Element-Erkennung.',
+        useCase: 'Kontinuierliche Überwachung geschäftskritischer Web-Checkouts und Portale.',
+        comparison: 'Ideal für laufendes Monitoring; unsere App ergänzt dies perfekt bei der initialen Testfall-Konzeption und Risikoanalyse.'
+      },
+      {
+        name: 'Rova AI',
+        tag: 'AI QA Co-Pilot',
+        strengths: 'Analysiert Pull Requests, Tickets und UI-Änderungen, um gezielt betroffene Testfälle vorzuschlagen.',
+        useCase: 'Agile Produktteams in GitHub/GitLab-Workflows.',
+        comparison: 'Ähnlicher Analyse-Ansatz, jedoch stark an Repo-Integrationen gebunden – hier reicht ein schneller Screenshot, Text oder Link.'
+      },
+      {
+        name: 'Qase / TestRail AI',
+        tag: 'Testmanagement + KI',
+        strengths: 'Verwaltet Testläufe, Metriken und Releases zentral und bietet KI-Assistenten zum Umschreiben manueller Testschritte.',
+        useCase: 'Strukturiertes Testmanagement und Audit-Nachweise in größeren Organisationen.',
+        comparison: 'Über den CSV- und Markdown-Export unserer App lassen sich die generierten Testfälle direkt in Qase oder TestRail importieren.'
+      }
+    ];
+
+    // Strukturiertes JSON-Schema für Gemini API
+    const ANALYSIS_RESPONSE_SCHEMA = {
+      type: 'OBJECT',
+      properties: {
+        featureTitle: { type: 'STRING' },
+        summary: { type: 'STRING' },
+        urlAnalysis: {
+          type: 'OBJECT',
+          properties: {
+            isUrlAnalyzed: { type: 'BOOLEAN' },
+            detectedFlowType: { type: 'STRING' },
+            urlStructureInsights: { type: 'STRING' },
+            securityAndStandardsChecks: { type: 'ARRAY', items: { type: 'STRING' } }
+          },
+          required: ['isUrlAnalyzed', 'detectedFlowType', 'urlStructureInsights', 'securityAndStandardsChecks']
+        },
+        detectedComponents: { type: 'ARRAY', items: { type: 'STRING' } },
+        riskLevel: { type: 'STRING', enum: ['Niedrig', 'Mittel', 'Hoch'] },
+        riskRationale: { type: 'STRING' },
+        edgeCases: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              title: { type: 'STRING' },
+              description: { type: 'STRING' },
+              severity: { type: 'STRING', enum: ['Hoch', 'Mittel', 'Niedrig'] }
+            },
+            required: ['title', 'description', 'severity']
+          }
+        },
+        openQuestionsForProduct: { type: 'ARRAY', items: { type: 'STRING' } },
+        manualTestCases: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              id: { type: 'STRING' },
+              title: { type: 'STRING' },
+              category: { type: 'STRING', enum: ['Positive', 'Negative', 'Edge Case', 'UI/UX'] },
+              preconditions: { type: 'STRING' },
+              steps: { type: 'ARRAY', items: { type: 'STRING' } },
+              expectedResult: { type: 'STRING' },
+              priority: { type: 'STRING', enum: ['Hoch', 'Mittel', 'Niedrig'] }
+            },
+            required: ['id', 'title', 'category', 'preconditions', 'steps', 'expectedResult', 'priority']
+          }
+        },
+        automationStrategy: {
+          type: 'OBJECT',
+          properties: {
+            recommendedCoverage: { type: 'STRING' },
+            selectorStrategy: { type: 'ARRAY', items: { type: 'STRING' } },
+            scenarios: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  id: { type: 'STRING' },
+                  title: { type: 'STRING' },
+                  testLayer: { type: 'STRING', enum: ['E2E', 'API', 'Integration', 'Component'] },
+                  rationale: { type: 'STRING' },
+                  priority: { type: 'STRING', enum: ['Hoch', 'Mittel', 'Niedrig'] }
+                },
+                required: ['id', 'title', 'testLayer', 'rationale', 'priority']
+              }
+            },
+            codeSnippets: {
+              type: 'OBJECT',
+              properties: {
+                playwright: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, code: { type: 'STRING' } }, required: ['filename', 'code'] },
+                cypress: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, code: { type: 'STRING' } }, required: ['filename', 'code'] },
+                seleniumPython: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, code: { type: 'STRING' } }, required: ['filename', 'code'] }
+              },
+              required: ['playwright', 'cypress', 'seleniumPython']
+            }
+          },
+          required: ['recommendedCoverage', 'selectorStrategy', 'scenarios', 'codeSnippets']
+        },
+        toolRecommendations: {
+          type: 'ARRAY',
+          items: {
+            type: 'OBJECT',
+            properties: {
+              name: { type: 'STRING' },
+              category: { type: 'STRING' },
+              suitabilityScore: { type: 'INTEGER' },
+              isTopPick: { type: 'BOOLEAN' },
+              learningCurve: { type: 'STRING', enum: ['Niedrig', 'Mittel', 'Hoch'] },
+              reasoning: { type: 'STRING' },
+              pros: { type: 'ARRAY', items: { type: 'STRING' } },
+              cons: { type: 'ARRAY', items: { type: 'STRING' } }
+            },
+            required: ['name', 'category', 'suitabilityScore', 'isTopPick', 'learningCurve', 'reasoning', 'pros', 'cons']
+          }
+        },
+        accessibilityAudit: {
+          type: 'OBJECT',
+          properties: {
+            isAuditEnabled: { type: 'BOOLEAN' },
+            conformanceTarget: { type: 'STRING' },
+            riskLevel: { type: 'STRING', enum: ['Niedrig', 'Mittel', 'Hoch'] },
+            riskRationale: { type: 'STRING' },
+            wcagChecks: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  id: { type: 'STRING' },
+                  criterion: { type: 'STRING' },
+                  principle: { type: 'STRING', enum: ['Wahrnehmbar', 'Bedienbar', 'Verständlich', 'Robust'] },
+                  level: { type: 'STRING', enum: ['A', 'AA'] },
+                  checkMethod: { type: 'STRING', enum: ['Manuell / Screenreader', 'Automatisiert (axe-core)'] },
+                  howToTest: { type: 'STRING' },
+                  expectedResult: { type: 'STRING' }
+                },
+                required: ['id', 'criterion', 'principle', 'level', 'checkMethod', 'howToTest', 'expectedResult']
+              }
+            },
+            screenreaderNotes: { type: 'ARRAY', items: { type: 'STRING' } },
+            automatedA11yCode: { type: 'OBJECT', properties: { filename: { type: 'STRING' }, code: { type: 'STRING' } }, required: ['filename', 'code'] },
+            recommendedA11yTools: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: { name: { type: 'STRING' }, type: { type: 'STRING' }, purpose: { type: 'STRING' } },
+                required: ['name', 'type', 'purpose']
+              }
+            }
+          },
+          required: ['isAuditEnabled', 'conformanceTarget', 'riskLevel', 'riskRationale', 'wcagChecks', 'screenreaderNotes', 'automatedA11yCode', 'recommendedA11yTools']
+        }
+      },
+      required: ['featureTitle', 'summary', 'urlAnalysis', 'detectedComponents', 'riskLevel', 'riskRationale', 'edgeCases', 'openQuestionsForProduct', 'manualTestCases', 'automationStrategy', 'toolRecommendations', 'accessibilityAudit']
+    };
+
+    function App() {
+      const [darkMode, setDarkMode] = useState(true);
+      const [inputMode, setInputMode] = useState('url');
+      const [customApiKey, setCustomApiKey] = useState(() => {
+        try { return localStorage.getItem('qa_analyzer_gemini_key') || ''; } catch { return ''; }
+      });
+      const [showApiKeyBar, setShowApiKeyBar] = useState(false);
+
+      // Eingabefelder
+      const [featureText, setFeatureText] = useState(SAMPLE_TEMPLATES[0].text);
+      const [imageData, setImageData] = useState(null);
+      const [isDragging, setIsDragging] = useState(false);
+      const [featureUrl, setFeatureUrl] = useState('https://shop.example.com/checkout/payment?currency=EUR&step=2');
+      const [urlFocus, setUrlFocus] = useState('');
+      const [urlHtmlSnippet, setUrlHtmlSnippet] = useState('');
+      const [showUrlSnippetField, setShowUrlSnippetField] = useState(false);
+      const [urlFetchNotice, setUrlFetchNotice] = useState('');
+
+      // WCAG 2.1 AA Prüfblock
+      const [wcagEnabled, setWcagEnabled] = useState(true);
+      const [selectedWcagPrinciples, setSelectedWcagPrinciples] = useState(['Wahrnehmbar', 'Bedienbar', 'Verständlich', 'Robust']);
+      const [selectedAssistiveModes, setSelectedAssistiveModes] = useState([...WCAG_ASSISTIVE_MODES]);
+
+      // Test-Konfiguration
+      const [selectedPlatform, setSelectedPlatform] = useState('Web-App');
+      const [selectedDepth, setSelectedDepth] = useState('Standard (E2E & Edge Cases)');
+
+      // Analyse & Ergebnis-States
+      const [isAnalyzing, setIsAnalyzing] = useState(false);
+      const [loadingStep, setLoadingStep] = useState('');
+      const [errorMsg, setErrorMsg] = useState('');
+      const [analysisResult, setAnalysisResult] = useState(null);
+      const [activeResultTab, setActiveResultTab] = useState('analysis');
+
+      // Interaktive Test-Tracking & Filter-States
+      const [testStatuses, setTestStatuses] = useState({});
+      const [wcagCheckStatuses, setWcagCheckStatuses] = useState({});
+      const [wcagPrincipleFilter, setWcagPrincipleFilter] = useState('ALLE');
+      const [priorityFilter, setPriorityFilter] = useState('ALLE');
+      const [categoryFilter, setCategoryFilter] = useState('ALLE');
+      const [searchQuery, setSearchQuery] = useState('');
+      const [expandedTestIds, setExpandedTestIds] = useState({});
+      const [selectedCodeFramework, setSelectedCodeFramework] = useState('playwright');
+      const [copiedKey, setCopiedKey] = useState('');
+      const [pasteToast, setPasteToast] = useState(false);
+      const fileInputRef = useRef(null);
+
+      // Globaler Paste-Listener für Screenshots (Strg+V)
+      useEffect(() => {
+        const handleGlobalPaste = (e) => {
+          const items = e.clipboardData?.items;
+          if (!items) return;
+          for (let i = 0; i < items.length; i++) {
+            if (items[i].type.indexOf('image') !== -1) {
+              const blob = items[i].getAsFile();
+              if (blob) {
+                e.preventDefault();
+                processImageFile(blob, 'Printscreen_Zwischenablage.png');
+                setInputMode('screenshot');
+                setPasteToast(true);
+                setTimeout(() => setPasteToast(false), 3200);
+              }
+              break;
+            }
+          }
+        };
+        window.addEventListener('paste', handleGlobalPaste);
+        return () => window.removeEventListener('paste', handleGlobalPaste);
+      }, []);
+
+      const processImageFile = (file, customName) => {
+        if (!file || !file.type.startsWith('image/')) {
+          setErrorMsg('Bitte wähle eine gültige Bilddatei (PNG, JPG, WEBP) aus.');
+          return;
+        }
+        setErrorMsg('');
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result;
+          setImageData({
+            base64: dataUrl.split(',')[1],
+            mimeType: file.type,
+            previewUrl: dataUrl,
+            name: customName || file.name || 'Screenshot.png'
+          });
+        };
+        reader.readAsDataURL(file);
+      };
+
+      const handleDrop = (e) => {
+        e.preventDefault();
+        setIsDragging(false);
+        const file = e.dataTransfer?.files?.[0];
+        if (file) processImageFile(file);
+      };
+
+      const toggleWcagPrinciple = (id) => {
+        setSelectedWcagPrinciples((prev) => prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]);
+      };
+
+      const toggleAssistiveMode = (mode) => {
+        setSelectedAssistiveModes((prev) => prev.includes(mode) ? prev.filter((item) => item !== mode) : [...prev, mode]);
+      };
+
+      const selectAllWcagOptions = () => {
+        setWcagEnabled(true);
+        setSelectedWcagPrinciples(WCAG_PRINCIPLES.map((p) => p.id));
+        setSelectedAssistiveModes([...WCAG_ASSISTIVE_MODES]);
+      };
+
+      const handleSaveApiKey = (val) => {
+        setCustomApiKey(val);
+        try { localStorage.setItem('qa_analyzer_gemini_key', val); } catch {}
+      };
+
+      const parseUrlContext = (rawUrl) => {
+        try {
+          const normalized = /^https?:\/\//i.test(rawUrl.trim()) ? rawUrl.trim() : `https://${rawUrl.trim()}`;
+          const u = new URL(normalized);
+          const params = Array.from(u.searchParams.entries()).map(([k, v]) => `${k}=${v}`);
+          return { valid: true, fullUrl: u.href, hostname: u.hostname, pathname: u.pathname, queryParams: params };
+        } catch {
+          return { valid: false, fullUrl: rawUrl.trim() };
+        }
+      };
+
+      const tryFetchPublicPageMetadata = async (targetUrl) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3500);
+        try {
+          const res = await fetch(targetUrl, { method: 'GET', mode: 'cors', signal: controller.signal });
+          clearTimeout(timeoutId);
+          if (!res.ok) return null;
+          const html = await res.text();
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          const title = doc.querySelector('title')?.textContent?.trim() || '';
+          const metaDesc = doc.querySelector('meta[name="description"]')?.getAttribute('content') || '';
+          const headings = Array.from(doc.querySelectorAll('h1, h2, h3')).slice(0, 8).map((h) => h.textContent.trim()).filter(Boolean);
+          const inputs = Array.from(doc.querySelectorAll('input, select, textarea, button')).slice(0, 15).map((el) => {
+            const tag = el.tagName.toLowerCase();
+            const type = el.getAttribute('type') || '';
+            const name = el.getAttribute('name') || el.getAttribute('id') || el.textContent?.trim().slice(0, 30) || '';
+            return `${tag}${type ? `[type=${type}]` : ''}(${name})`;
+          });
+          return { title, metaDesc, headings, inputs };
+        } catch {
+          clearTimeout(timeoutId);
+          return null;
+        }
+      };
+
+      const analyzeFeature = async () => {
+        setErrorMsg('');
+        setUrlFetchNotice('');
+
+        if (!customApiKey.trim()) {
+          setShowApiKeyBar(true);
+          setErrorMsg('Bitte hinterlege oben deinen kostenlosen Gemini API-Key (aus Google AI Studio), damit die Analyse ausgeführt werden kann.');
+          return;
+        }
+
+        if (inputMode === 'text' && !featureText.trim()) {
+          setErrorMsg('Bitte gib eine Feature-Beschreibung oder User Story ein.');
+          return;
+        }
+        if (inputMode === 'screenshot' && !imageData) {
+          setErrorMsg('Bitte lade einen Screenshot hoch oder füge ihn per Strg+V ein.');
+          return;
+        }
+        if (inputMode === 'url' && !featureUrl.trim()) {
+          setErrorMsg('Bitte gib eine gültige Feature- oder Website-URL ein.');
+          return;
+        }
+
+        setIsAnalyzing(true);
+        setLoadingStep('Kontext & Eingabedaten werden vorbereitet...');
+
+        let fetchedMeta = null;
+        let parsedUrlInfo = null;
+
+        if (inputMode === 'url') {
+          parsedUrlInfo = parseUrlContext(featureUrl);
+          if (!parsedUrlInfo.valid) {
+            setIsAnalyzing(false);
+            setErrorMsg('Bitte gib eine gültige URL an (z. B. https://app.example.com/checkout).');
+            return;
+          }
+          setLoadingStep('Prüfe öffentliche Seiten-Metadaten & URL-Struktur...');
+          fetchedMeta = await tryFetchPublicPageMetadata(parsedUrlInfo.fullUrl);
+          setUrlFetchNotice(
+            fetchedMeta
+              ? 'Öffentliche Seiten-Metadaten erfolgreich ausgelesen und in die Analyse einbezogen.'
+              : 'Live-Zugriff durch Browser-CORS oder Login-Schutz begrenzt – KI analysiert URL-Struktur, Domain-Semantik, Query-Parameter & Web-Standards.'
+          );
+        }
+
+        setLoadingStep('KI-Testarchitekt erstellt Risikoanalyse, Testplan & WCAG-Audit...');
+
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${customApiKey.trim()}`;
+        const activeWcagPrinciplesText = selectedWcagPrinciples.length > 0 ? selectedWcagPrinciples.join(', ') : 'Wahrnehmbar, Bedienbar, Verständlich, Robust';
+        const activeAssistiveText = selectedAssistiveModes.length > 0 ? selectedAssistiveModes.join(', ') : 'Screenreader (NVDA / VoiceOver), Nur-Tastatur-Test, Automatisierter axe-core Scan';
+
+        const systemInstruction = `Du bist ein leitender Senior QA Engineer, Test-Architekt, Testautomatisierungs-Spezialist und zertifizierter Barrierefreiheits-Auditor (WCAG 2.1 Level AA / BFSG).
+Analysiere das übergebene Software-Feature für die Zielplattform "${selectedPlatform}" mit der Test-Tiefe "${selectedDepth}" vollständig auf Deutsch.
+1. Feature-Analyse & Risiken: Erkenne Feature, UI-Komponenten, Risiko (Niedrig/Mittel/Hoch), Edge Cases & offene Product-Fragen. Falls URL-Modus aktiv: setze "urlAnalysis.isUrlAnalyzed" auf true und analysiere Flow-Typ, Pfad/Query-Parameter & Web-Standards.
+2. Manueller Testplan: 6 bis 11 präzise Testfälle (TC-001...) mit Kategorie, Priorität, Vorbedingungen, Schritten und erwartetem Ergebnis.
+3. Automatisierungs-Plan & Code: Szenarien, Selektor-Strategie & lauffähiger Beispielcode für playwright (TS), cypress und seleniumPython.
+4. Barrierefreiheits-Prüfblock / WCAG 2.1 Level AA Audit ("accessibilityAudit"): Status ${wcagEnabled ? 'AKTIV (Prinzipien: ' + activeWcagPrinciplesText + ' | Methoden: ' + activeAssistiveText + ')' : 'Basisprüfung'}. Erstelle konkrete WCAG-Prüfpunkte (A11Y-01...), Screenreader-Hinweise, ein lauffähiges "@axe-core/playwright" Skript und Tool-Empfehlungen.
+5. Tool-Empfehlungen: 4 passende Tools mit Score (0-100), Vor- und Nachteilen.`;
+
+        const userParts = [];
+        if (inputMode === 'text') {
+          userParts.push({ text: `Eingabe-Modus: Text / User Story\nZielplattform: ${selectedPlatform}\nTest-Tiefe: ${selectedDepth}\n\nFeature-Beschreibung:\n${featureText.trim()}` });
+        } else if (inputMode === 'screenshot') {
+          userParts.push({ text: `Eingabe-Modus: UI-Screenshot\nZielplattform: ${selectedPlatform}\nTest-Tiefe: ${selectedDepth}\n${featureText.trim() ? 'Zusatzkontext: ' + featureText.trim() : ''}` });
+          if (imageData) userParts.push({ inlineData: { mimeType: imageData.mimeType, data: imageData.base64 } });
+        } else if (inputMode === 'url') {
+          let urlPrompt = `Eingabe-Modus: Website / Feature-URL\nZielplattform: ${selectedPlatform}\nTest-Tiefe: ${selectedDepth}\nURL: ${parsedUrlInfo.fullUrl}\nHostname: ${parsedUrlInfo.hostname}\nPfad: ${parsedUrlInfo.pathname}\nQuery: ${parsedUrlInfo.queryParams.join(', ') || 'Keine'}\n${urlFocus.trim() ? 'Test-Fokus: ' + urlFocus.trim() : ''}`;
+          if (fetchedMeta) urlPrompt += `\nMetadaten: Titel=${fetchedMeta.title}, Headings=${fetchedMeta.headings.join(' | ')}, Inputs=${fetchedMeta.inputs.join(', ')}`;
+          if (urlHtmlSnippet.trim()) urlPrompt += `\nHTML-Auszug:\n${urlHtmlSnippet.trim().slice(0, 6000)}`;
+          if (wcagEnabled) urlPrompt += `\nWCAG 2.1 AA Fokus: ${activeWcagPrinciplesText} | ${activeAssistiveText}`;
+          userParts.push({ text: urlPrompt });
+        }
+
+        const payload = {
+          contents: [{ role: 'user', parts: userParts }],
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          generationConfig: { responseMimeType: 'application/json', responseSchema: ANALYSIS_RESPONSE_SCHEMA, temperature: 0.25 }
+        };
+
+        const maxRetries = 3;
+        let attempt = 0;
+
+        while (attempt <= maxRetries) {
+          try {
+            const response = await fetch(apiUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+              if ((response.status === 429 || response.status >= 500) && attempt < maxRetries) {
+                await new Promise((res) => setTimeout(res, Math.pow(2, attempt) * 1000));
+                attempt++;
+                continue;
+              }
+              throw new Error(`API-Fehler (Status ${response.status}). Bitte prüfe deinen Gemini API-Key.`);
+            }
+
+            const data = await response.json();
+            const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (!rawText) throw new Error('Keine auswertbare Antwort von der KI erhalten.');
+
+            const parsed = JSON.parse(rawText);
+            const initSt = {};
+            (parsed.manualTestCases || []).forEach((tc) => { initSt[tc.id] = 'Offen'; });
+            const initWcag = {};
+            (parsed.accessibilityAudit?.wcagChecks || []).forEach((chk) => { initWcag[chk.id] = 'Offen'; });
+
+            setAnalysisResult(parsed);
+            setTestStatuses(initSt);
+            setWcagCheckStatuses(initWcag);
+            setWcagPrincipleFilter('ALLE');
+            setExpandedTestIds({});
+            setPriorityFilter('ALLE');
+            setCategoryFilter('ALLE');
+            setSearchQuery('');
+            setActiveResultTab('analysis');
+            setIsAnalyzing(false);
+            return;
+          } catch (err) {
+            if (attempt >= maxRetries) {
+              setErrorMsg(err?.message || 'Fehler bei der Analyse.');
+              setIsAnalyzing(false);
+              return;
+            }
+            await new Promise((res) => setTimeout(res, Math.pow(2, attempt) * 1000));
+            attempt++;
+          }
+        }
+      };
+
+      const filteredManualTests = useMemo(() => {
+        if (!analysisResult?.manualTestCases) return [];
+        return analysisResult.manualTestCases.filter((tc) => {
+          const mp = priorityFilter === 'ALLE' || tc.priority === priorityFilter;
+          const mc = categoryFilter === 'ALLE' || tc.category === categoryFilter;
+          const q = searchQuery.toLowerCase().trim();
+          const mq = !q || tc.id.toLowerCase().includes(q) || tc.title.toLowerCase().includes(q) || tc.expectedResult.toLowerCase().includes(q) || tc.preconditions.toLowerCase().includes(q);
+          return mp && mc && mq;
+        });
+      }, [analysisResult, priorityFilter, categoryFilter, searchQuery]);
+
+      const testStats = useMemo(() => {
+        const list = analysisResult?.manualTestCases || [];
+        let passed = 0, failed = 0, open = 0;
+        list.forEach((tc) => {
+          const st = testStatuses[tc.id] || 'Offen';
+          if (st === 'Bestanden') passed++;
+          else if (st === 'Fehlgeschlagen') failed++;
+          else open++;
+        });
+        return { total: list.length, passed, failed, open };
+      }, [analysisResult, testStatuses]);
+
+      const wcagStats = useMemo(() => {
+        const list = analysisResult?.accessibilityAudit?.wcagChecks || [];
+        let conform = 0, barrier = 0, open = 0;
+        list.forEach((chk) => {
+          const st = wcagCheckStatuses[chk.id] || 'Offen';
+          if (st === 'Konform') conform++;
+          else if (st === 'Barriere gefunden') barrier++;
+          else open++;
+        });
+        return { total: list.length, conform, barrier, open };
+      }, [analysisResult, wcagCheckStatuses]);
+
+      const filteredWcagChecks = useMemo(() => {
+        const list = analysisResult?.accessibilityAudit?.wcagChecks || [];
+        if (wcagPrincipleFilter === 'ALLE') return list;
+        return list.filter((chk) => chk.principle === wcagPrincipleFilter);
+      }, [analysisResult, wcagPrincipleFilter]);
+
+      const copyToClipboard = (text, key) => {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        setCopiedKey(key);
+        setTimeout(() => setCopiedKey(''), 2000);
+      };
+
+      const generateMarkdownReport = () => {
+        if (!analysisResult) return '';
+        const r = analysisResult;
+        let md = `# QA Testplan & Feature-Analyse: ${r.featureTitle}\n\n`;
+        md += `- **Zielplattform:** ${selectedPlatform}\n- **Test-Tiefe:** ${selectedDepth}\n- **Gesamtrisiko:** ${r.riskLevel}\n\n`;
+        md += `## 1. Feature-Analyse & Risiken\n${r.summary}\n\n**Risiko-Begründung:** ${r.riskRationale}\n\n`;
+        md += `## 2. Manueller Testplan\n\n| Status | ID | Titel | Kategorie | Priorität | Vorbedingungen | Testschritte | Erwartetes Ergebnis |\n| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n`;
+        r.manualTestCases.forEach((tc) => {
+          const st = testStatuses[tc.id] || 'Offen';
+          const stepsStr = tc.steps.map((s, idx) => `${idx + 1}. ${s}`).join('<br>');
+          md += `| ${st} | ${tc.id} | ${tc.title} | ${tc.category} | ${tc.priority} | ${tc.preconditions} | ${stepsStr} | ${tc.expectedResult} |\n`;
+        });
+        return md;
+      };
+
+      const generateCSV = () => {
+        if (!analysisResult?.manualTestCases) return '';
+        const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
+        const headers = ['ID', 'Title', 'Category', 'Priority', 'Status', 'Preconditions', 'Steps', 'Expected Result'];
+        const rows = analysisResult.manualTestCases.map((tc) => [
+          tc.id, tc.title, tc.category, tc.priority, testStatuses[tc.id] || 'Offen',
+          tc.preconditions, tc.steps.map((s, i) => `${i + 1}. ${s}`).join(' | '), tc.expectedResult
+        ]);
+        return '\uFEFF' + [headers, ...rows].map((r) => r.map(esc).join(';')).join('\n');
+      };
+
+      const triggerDownload = (content, filename, mimeType) => {
+        const blob = new Blob([content], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      };
+
+      const getBadgeStyle = (level) => {
+        if (level === 'Hoch') return darkMode ? 'bg-rose-500/15 text-rose-300 border-rose-500/30' : 'bg-rose-50 text-rose-700 border-rose-200';
+        if (level === 'Mittel') return darkMode ? 'bg-amber-500/15 text-amber-300 border-amber-500/30' : 'bg-amber-50 text-amber-700 border-amber-200';
+        return darkMode ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' : 'bg-emerald-50 text-emerald-700 border-emerald-200';
+      };
+
+      const theme = {
+        bg: darkMode ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900',
+        header: darkMode ? 'bg-slate-900/90 border-slate-800' : 'bg-white/95 border-slate-200',
+        card: darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-sm',
+        subCard: darkMode ? 'bg-slate-800/60 border-slate-700/70' : 'bg-slate-50 border-slate-200/90',
+        input: darkMode ? 'bg-slate-950 border-slate-800 text-slate-100 placeholder-slate-500 focus:border-indigo-500' : 'bg-white border-slate-300 text-slate-900 placeholder-slate-400 focus:border-indigo-500',
+        muted: darkMode ? 'text-slate-400' : 'text-slate-500',
+        border: darkMode ? 'border-slate-800' : 'border-slate-200'
+      };
+
+      return (
+        <div className={`min-h-screen transition-colors duration-200 ${theme.bg}`}>
+          {pasteToast && (
+            <div className="fixed bottom-5 right-5 z-50 flex items-center gap-2.5 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-medium text-white shadow-xl">
+              <Icon name="image" className="h-4 w-4" />
+              Screenshot per Strg+V eingefügt!
+            </div>
+          )}
+
+          {/* Header */}
+          <header className={`sticky top-0 z-30 border-b backdrop-blur-md ${theme.header}`}>
+            <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 py-3.5 sm:px-6">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-indigo-600 to-emerald-500 text-white shadow-md">
+                  <Icon name="layers" className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h1 className="text-base font-bold tracking-tight sm:text-lg">QA Feature Analyzer & Testplan Generator</h1>
+                    <span className="rounded-full bg-emerald-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-400">WCAG 2.1 AA Ready</span>
+                  </div>
+                  <p className={`text-xs ${theme.muted}`}>Text, Printscreen oder Website-URL + WCAG 2.1 AA Barrierefreiheits-Prüfung</p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowApiKeyBar(!showApiKeyBar)}
+                  className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${theme.card} ${customApiKey ? 'border-emerald-500/50 text-emerald-400' : 'border-amber-500/60 text-amber-400'}`}
+                >
+                  <Icon name="key-round" className="h-3.5 w-3.5" />
+                  <span>{customApiKey ? 'API-Key gespeichert' : 'Gemini API-Key eingeben'}</span>
+                </button>
+
+                {analysisResult && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => copyToClipboard(generateMarkdownReport(), 'md-copy')}
+                      className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${theme.card} hover:border-indigo-500`}
+                    >
+                      <Icon name={copiedKey === 'md-copy' ? 'check' : 'copy'} className="h-3.5 w-3.5 text-indigo-400" />
+                      <span className="hidden sm:inline">{copiedKey === 'md-copy' ? 'Kopiert!' : 'Markdown'}</span>
+                    </button>
+                    <button
+                      onClick={() => triggerDownload(generateCSV(), `Testplan_${analysisResult.featureTitle.replace(/[^a-zA-Z0-9_-]/g, '_')}.csv`, 'text/csv;charset=utf-8')}
+                      className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition ${theme.card} hover:border-emerald-500`}
+                    >
+                      <Icon name="download" className="h-3.5 w-3.5 text-emerald-400" />
+                      <span>.CSV</span>
+                    </button>
+                  </div>
+                )}
+
+                <button onClick={() => setDarkMode(!darkMode)} className={`rounded-lg border p-2 transition ${theme.card}`}>
+                  <Icon name={darkMode ? 'sun' : 'moon'} className="h-4 w-4 text-amber-400" />
+                </button>
+              </div>
+            </div>
+
+            {showApiKeyBar && (
+              <div className={`border-t px-4 py-3 sm:px-6 ${theme.border} ${theme.subCard}`}>
+                <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <Icon name="key-round" className="h-4 w-4 text-indigo-400" />
+                    <span><strong>Gemini API-Key</strong> (kostenlos über Google AI Studio, wird nur in deinem Browser gespeichert):</span>
+                  </div>
+                  <div className="flex flex-1 items-center gap-2 sm:max-w-md">
+                    <input
+                      type="password"
+                      value={customApiKey}
+                      onChange={(e) => handleSaveApiKey(e.target.value)}
+                      placeholder="AIzaSy..."
+                      className={`w-full rounded-lg border px-2.5 py-1.5 font-mono text-xs outline-none ${theme.input}`}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+          </header>
+
+          {/* Main Grid */}
+          <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+              {/* Linke Spalte */}
+              <div className={`space-y-5 ${inputMode === 'url' ? 'lg:col-span-6' : 'lg:col-span-5'}`}>
+                <div className={`rounded-2xl border p-5 ${theme.card}`}>
+                  <div className="mb-3 flex items-center justify-between">
+                    <h2 className="text-sm font-bold uppercase tracking-wider text-indigo-400">1. Eingabequelle wählen</h2>
+                    <span className={`flex items-center gap-1 text-[11px] ${theme.muted}`}>
+                      <Icon name="clipboard-paste" className="h-3.5 w-3.5 text-emerald-400" /> Strg+V aktiv
+                    </span>
+                  </div>
+
+                  {/* 3 Eingabe-Tabs */}
+                  <div className={`mb-5 grid grid-cols-3 gap-1.5 rounded-xl border p-1.5 ${theme.subCard}`}>
+                    {[
+                      { id: 'text', label: 'Text / Story', icon: 'file-text' },
+                      { id: 'screenshot', label: 'Screenshot', icon: 'image' },
+                      { id: 'url', label: 'Website / URL', icon: 'link-2' }
+                    ].map((mode) => (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        onClick={() => { setInputMode(mode.id); setErrorMsg(''); }}
+                        className={`flex items-center justify-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-semibold transition ${
+                          inputMode === mode.id ? 'bg-indigo-600 text-white shadow-sm' : `${theme.muted} hover:text-indigo-400`
+                        }`}
+                      >
+                        <Icon name={mode.icon} className="h-3.5 w-3.5" />
+                        <span className="truncate">{mode.label}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* TAB 1: TEXT */}
+                  {inputMode === 'text' && (
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap gap-1.5">
+                        {SAMPLE_TEMPLATES.map((tpl) => (
+                          <button
+                            key={tpl.id}
+                            type="button"
+                            onClick={() => { setFeatureText(tpl.text); setSelectedPlatform(tpl.platform); }}
+                            className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition ${theme.subCard} hover:border-indigo-500`}
+                          >
+                            {tpl.label}
+                          </button>
+                        ))}
+                      </div>
+                      <textarea
+                        rows={9}
+                        value={featureText}
+                        onChange={(e) => setFeatureText(e.target.value)}
+                        placeholder="User Story oder Akzeptanzkriterien einfügen..."
+                        className={`w-full rounded-xl border p-3 text-xs leading-relaxed outline-none ${theme.input}`}
+                      />
+                    </div>
+                  )}
+
+                  {/* TAB 2: SCREENSHOT */}
+                  {inputMode === 'screenshot' && (
+                    <div className="space-y-4">
+                      <div
+                        onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                        onDragLeave={() => setIsDragging(false)}
+                        onDrop={handleDrop}
+                        onClick={() => fileInputRef.current?.click()}
+                        className={`flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed p-6 text-center transition ${
+                          isDragging ? 'border-indigo-500 bg-indigo-500/10' : `${theme.subCard} hover:border-indigo-500/70`
+                        }`}
+                      >
+                        <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => e.target.files?.[0] && processImageFile(e.target.files[0])} />
+                        {imageData ? (
+                          <div className="w-full space-y-3" onClick={(e) => e.stopPropagation()}>
+                            <img src={imageData.previewUrl} alt="Screenshot" className="mx-auto max-h-56 rounded-xl object-contain" />
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="truncate font-medium text-emerald-400">{imageData.name}</span>
+                              <button type="button" onClick={() => setImageData(null)} className="rounded-lg bg-rose-500/15 px-2.5 py-1 text-rose-400">Entfernen</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <Icon name="upload" className="mb-2 h-8 w-8 text-indigo-400" />
+                            <p className="text-sm font-semibold">Screenshot ablegen oder per <span className="text-emerald-400">Strg+V</span> einfügen</p>
+                          </>
+                        )}
+                      </div>
+                      <textarea
+                        rows={3}
+                        value={featureText}
+                        onChange={(e) => setFeatureText(e.target.value)}
+                        placeholder="Optionaler Kontext zum Screenshot..."
+                        className={`w-full rounded-xl border p-3 text-xs outline-none ${theme.input}`}
+                      />
+                    </div>
+                  )}
+
+                  {/* TAB 3: WEBSITE / URL + NEBENSTEHENDER WCAG 2.1 AA PRÜFBLOCK */}
+                  {inputMode === 'url' && (
+                    <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">
+                      <div className="space-y-3.5 xl:col-span-6">
+                        <div>
+                          <label className={`mb-1.5 block text-xs font-medium ${theme.muted}`}>Beispiel-URLs:</label>
+                          <div className="flex flex-wrap gap-1.5">
+                            {SAMPLE_URLS.map((item, idx) => (
+                              <button
+                                key={idx}
+                                type="button"
+                                onClick={() => { setFeatureUrl(item.url); setUrlFocus(item.focus); }}
+                                className={`rounded-lg border px-2 py-1 text-[11px] font-medium transition ${theme.subCard} hover:border-emerald-500`}
+                              >
+                                {item.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="mb-1.5 block text-xs font-semibold">Website- oder Staging-URL des Features</label>
+                          <input
+                            type="url"
+                            value={featureUrl}
+                            onChange={(e) => setFeatureUrl(e.target.value)}
+                            placeholder="https://app.example.com/checkout"
+                            className={`w-full rounded-xl border px-3 py-2.5 text-xs outline-none ${theme.input}`}
+                          />
+                        </div>
+
+                        <div>
+                          <label className="mb-1.5 block text-xs font-semibold">Optionaler Test-Fokus</label>
+                          <input
+                            type="text"
+                            value={urlFocus}
+                            onChange={(e) => setUrlFocus(e.target.value)}
+                            placeholder="z. B. Formularvalidierung, Mobile-Ansicht"
+                            className={`w-full rounded-xl border px-3 py-2 text-xs outline-none ${theme.input}`}
+                          />
+                        </div>
+
+                        <div className={`rounded-xl border p-3 text-xs ${theme.subCard}`}>
+                          <button type="button" onClick={() => setShowUrlSnippetField(!showUrlSnippetField)} className="text-[11px] font-semibold text-indigo-400 hover:underline">
+                            {showUrlSnippetField ? '− Seiten-HTML/Text-Feld ausblenden' : '+ Optional Seiten-Text oder HTML einfügen'}
+                          </button>
+                          {showUrlSnippetField && (
+                            <textarea
+                              rows={3}
+                              value={urlHtmlSnippet}
+                              onChange={(e) => setUrlHtmlSnippet(e.target.value)}
+                              placeholder="Optional kopiertes HTML einfügen..."
+                              className={`mt-2 w-full rounded-lg border p-2 font-mono text-[11px] outline-none ${theme.input}`}
+                            />
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Prüfblock: Barrierefreiheit / WCAG 2.1 AA direkt neben URL-Input */}
+                      <div className={`flex flex-col justify-between rounded-xl border p-3.5 transition xl:col-span-6 ${wcagEnabled ? 'border-emerald-500/50 bg-emerald-500/5' : `${theme.subCard} opacity-80`}`}>
+                        <div>
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400">
+                                <Icon name="accessibility" className="h-4 w-4" />
+                              </div>
+                              <div>
+                                <h3 className="text-xs font-bold leading-tight">Prüfblock: Barrierefreiheit / WCAG 2.1 AA</h3>
+                                <span className="mt-0.5 inline-block rounded bg-indigo-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-300">
+                                  BFSG / EU Accessibility Act Konformität
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setWcagEnabled(!wcagEnabled)}
+                              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${wcagEnabled ? 'bg-emerald-500' : 'bg-slate-600'}`}
+                            >
+                              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition ${wcagEnabled ? 'translate-x-4' : 'translate-x-0'}`} />
+                            </button>
+                          </div>
+
+                          <div className="mt-3">
+                            <div className="mb-1.5 flex items-center justify-between">
+                              <span className={`text-[11px] font-semibold ${theme.muted}`}>4 WCAG-Prinzipien & Kernkriterien:</span>
+                              <button type="button" onClick={selectAllWcagOptions} className="text-[10px] font-semibold text-emerald-400 hover:underline">
+                                Alle wählen
+                              </button>
+                            </div>
+                            <div className="space-y-1.5">
+                              {WCAG_PRINCIPLES.map((item) => {
+                                const checked = wcagEnabled && selectedWcagPrinciples.includes(item.id);
+                                return (
+                                  <label key={item.id} className={`flex cursor-pointer items-start gap-2 rounded-lg border p-2 text-left transition ${checked ? 'border-emerald-500/50 bg-emerald-500/10' : theme.card}`}>
+                                    <input type="checkbox" checked={checked} disabled={!wcagEnabled} onChange={() => toggleWcagPrinciple(item.id)} className="mt-0.5 h-3.5 w-3.5 accent-emerald-500" />
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex items-center gap-1 text-[11px] font-semibold">
+                                        <Icon name={item.icon} className="h-3 w-3 text-emerald-400" />
+                                        <span className="truncate">{item.label}</span>
+                                      </div>
+                                      <p className={`mt-0.5 text-[10px] leading-snug ${theme.muted}`}>{item.criteria}</p>
+                                    </div>
+                                  </label>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          <div className="mt-3">
+                            <span className={`mb-1.5 block text-[11px] font-semibold ${theme.muted}`}>Assistive Technologien & Prüftiefe:</span>
+                            <div className="flex flex-wrap gap-1">
+                              {WCAG_ASSISTIVE_MODES.map((mode) => {
+                                const active = wcagEnabled && selectedAssistiveModes.includes(mode);
+                                return (
+                                  <button
+                                    key={mode}
+                                    type="button"
+                                    disabled={!wcagEnabled}
+                                    onClick={() => toggleAssistiveMode(mode)}
+                                    className={`rounded-md border px-2 py-1 text-[10px] font-medium transition ${active ? 'border-indigo-500 bg-indigo-500/20 text-indigo-300' : `${theme.card} ${theme.muted}`}`}
+                                  >
+                                    {mode}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Test-Konfiguration */}
+                  <div className={`mt-5 border-t pt-5 ${theme.border}`}>
+                    <div className="mb-3 text-xs font-bold uppercase tracking-wider text-indigo-400">2. Test-Konfiguration</div>
+                    <div className="mb-4 grid grid-cols-2 gap-2">
+                      {PLATFORMS.map((plat) => (
+                        <button
+                          key={plat.id}
+                          type="button"
+                          onClick={() => setSelectedPlatform(plat.id)}
+                          className={`flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-xs font-medium transition ${
+                            selectedPlatform === plat.id ? 'border-indigo-500 bg-indigo-500/15 text-indigo-300' : theme.subCard
+                          }`}
+                        >
+                          <Icon name={plat.icon} className="h-4 w-4 text-indigo-400" />
+                          <span className="truncate">{plat.label}</span>
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="mb-5 space-y-1.5">
+                      {TEST_DEPTHS.map((depth) => (
+                        <button
+                          key={depth.id}
+                          type="button"
+                          onClick={() => setSelectedDepth(depth.id)}
+                          className={`flex w-full items-center justify-between rounded-xl border px-3 py-2 text-left transition ${
+                            selectedDepth === depth.id ? 'border-emerald-500/70 bg-emerald-500/10' : theme.subCard
+                          }`}
+                        >
+                          <div>
+                            <div className="text-xs font-semibold">{depth.label}</div>
+                            <div className={`text-[11px] ${theme.muted}`}>{depth.desc}</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+
+                    {errorMsg && (
+                      <div className="mb-4 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-300">{errorMsg}</div>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={analyzeFeature}
+                      disabled={isAnalyzing}
+                      className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-indigo-600 via-indigo-500 to-emerald-600 px-5 py-3.5 text-sm font-bold text-white shadow-lg transition hover:brightness-110 disabled:opacity-60"
+                    >
+                      <Icon name="sparkles" className="h-4 w-4" />
+                      <span>{isAnalyzing ? 'Analysiere Feature...' : 'Feature analysieren & Testplan generieren'}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Rechte Spalte: Ergebnisse */}
+              <div className={inputMode === 'url' ? 'lg:col-span-6' : 'lg:col-span-7'}>
+                {isAnalyzing ? (
+                  <div className={`flex min-h-[540px] flex-col items-center justify-center rounded-2xl border p-8 text-center ${theme.card}`}>
+                    <Icon name="refresh-cw" className="mb-4 h-10 w-10 animate-spin text-indigo-400" />
+                    <h3 className="text-lg font-bold">QA-Analyse läuft...</h3>
+                    <p className="mt-2 text-sm text-indigo-400">{loadingStep}</p>
+                  </div>
+                ) : !analysisResult ? (
+                  <div className={`flex min-h-[540px] flex-col items-center justify-center rounded-2xl border p-8 text-center ${theme.card}`}>
+                    <Icon name="compass" className="mb-4 h-12 w-12 text-indigo-400" />
+                    <h3 className="text-lg font-bold">Bereit für deine QA-Feature-Analyse</h3>
+                    <p className={`mt-2 max-w-md text-sm ${theme.muted}`}>
+                      Gib links eine Website-URL, einen Screenshot oder Text ein – inklusive <strong>WCAG 2.1 AA Barrierefreiheits-Prüfung</strong>.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-5">
+                    <div className={`rounded-2xl border p-5 ${theme.card}`}>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-md bg-indigo-500/15 px-2.5 py-0.5 text-xs font-semibold text-indigo-400">{selectedPlatform}</span>
+                        <span className={`rounded-md border px-2.5 py-0.5 text-xs font-semibold ${getBadgeStyle(analysisResult.riskLevel)}`}>
+                          Risiko: {analysisResult.riskLevel}
+                        </span>
+                      </div>
+                      <h2 className="mt-2.5 text-xl font-bold">{analysisResult.featureTitle}</h2>
+                      {urlFetchNotice && (
+                        <div className="mt-3 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-xs text-indigo-300">{urlFetchNotice}</div>
+                      )}
+
+                      <div className={`mt-5 flex flex-wrap gap-1.5 border-t pt-4 ${theme.border}`}>
+                        {[
+                          { id: 'analysis', label: 'Analyse & Risiken', icon: 'shield-alert' },
+                          { id: 'manual', label: `Manuelle Tests (${analysisResult.manualTestCases.length})`, icon: 'check-circle-2' },
+                          { id: 'automation', label: `Automatisierung (${analysisResult.automationStrategy.scenarios.length})`, icon: 'code-2' },
+                          { id: 'wcag', label: `WCAG 2.1 AA Audit (${analysisResult.accessibilityAudit?.wcagChecks?.length || 0})`, icon: 'accessibility' },
+                          { id: 'tools', label: 'Tools & Vergleich', icon: 'wrench' }
+                        ].map((tab) => (
+                          <button
+                            key={tab.id}
+                            onClick={() => setActiveResultTab(tab.id)}
+                            className={`flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition ${
+                              activeResultTab === tab.id ? (tab.id === 'wcag' ? 'bg-emerald-600 text-white' : 'bg-indigo-600 text-white') : theme.subCard
+                            }`}
+                          >
+                            <Icon name={tab.icon} className="h-3.5 w-3.5" />
+                            <span>{tab.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {activeResultTab === 'analysis' && (
+                      <div className={`space-y-4 rounded-2xl border p-5 ${theme.card}`}>
+                        <p className="text-sm leading-relaxed">{analysisResult.summary}</p>
+                        <div className={`rounded-xl border p-3.5 ${theme.subCard}`}>
+                          <div className="text-xs font-bold">Risiko-Begründung</div>
+                          <p className={`mt-1 text-xs ${theme.muted}`}>{analysisResult.riskRationale}</p>
+                        </div>
+                        <div className="space-y-2">
+                          <h4 className="text-xs font-bold uppercase text-amber-400">Edge Cases</h4>
+                          {analysisResult.edgeCases.map((ec, i) => (
+                            <div key={i} className={`rounded-xl border p-3 text-xs ${theme.subCard}`}>
+                              <strong>[{ec.severity}] {ec.title}:</strong> <span className={theme.muted}>{ec.description}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="space-y-2">
+                          <h4 className="text-xs font-bold uppercase text-indigo-400">Offene Fragen an Product</h4>
+                          {analysisResult.openQuestionsForProduct.map((q, i) => (
+                            <div key={i} className={`rounded-xl border p-3 text-xs ${theme.subCard}`}>{q}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {activeResultTab === 'manual' && (
+                      <div className={`space-y-3 rounded-2xl border p-5 ${theme.card}`}>
+                        <div className="flex items-center justify-between text-xs">
+                          <span>Bestanden: <strong className="text-emerald-400">{testStats.passed}</strong> / {testStats.total}</span>
+                        </div>
+                        {filteredManualTests.map((tc) => {
+                          const st = testStatuses[tc.id] || 'Offen';
+                          return (
+                            <div key={tc.id} className={`rounded-xl border p-3.5 ${theme.subCard}`}>
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div>
+                                  <span className="font-mono text-xs font-bold text-indigo-400">{tc.id}</span> · <strong className="text-sm">{tc.title}</strong>
+                                </div>
+                                <div className="flex gap-1">
+                                  {['Offen', 'Bestanden', 'Fehlgeschlagen'].map((s) => (
+                                    <button
+                                      key={s}
+                                      onClick={() => setTestStatuses((p) => ({ ...p, [tc.id]: s }))}
+                                      className={`rounded-lg px-2 py-1 text-[11px] ${st === s ? 'bg-indigo-600 text-white' : theme.muted}`}
+                                    >
+                                      {s}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                              <ol className="mt-2 list-inside list-decimal space-y-1 text-xs">
+                                {tc.steps.map((step, i) => <li key={i}>{step}</li>)}
+                              </ol>
+                              <div className="mt-2 rounded-lg bg-emerald-500/10 p-2 text-xs text-emerald-300">
+                                <strong>Erwartet:</strong> {tc.expectedResult}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {activeResultTab === 'automation' && (
+                      <div className={`overflow-hidden rounded-2xl border ${theme.card}`}>
+                        <div className={`flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3 ${theme.border}`}>
+                          <div className="flex gap-1.5">
+                            {[{ id: 'playwright', label: 'Playwright (TS)' }, { id: 'cypress', label: 'Cypress' }, { id: 'seleniumPython', label: 'Selenium (Python)' }].map((fw) => (
+                              <button
+                                key={fw.id}
+                                onClick={() => setSelectedCodeFramework(fw.id)}
+                                className={`rounded-lg px-2.5 py-1 text-xs font-semibold ${selectedCodeFramework === fw.id ? 'bg-indigo-600 text-white' : theme.subCard}`}
+                              >
+                                {fw.label}
+                              </button>
+                            ))}
+                          </div>
+                          <button
+                            onClick={() => copyToClipboard(analysisResult.automationStrategy.codeSnippets[selectedCodeFramework]?.code || '', 'code')}
+                            className={`rounded-lg border px-2.5 py-1 text-xs ${theme.subCard}`}
+                          >
+                            {copiedKey === 'code' ? 'Kopiert!' : 'Code kopieren'}
+                          </button>
+                        </div>
+                        <pre className="overflow-x-auto bg-slate-950 p-4 font-mono text-xs text-slate-200">
+                          <code>{analysisResult.automationStrategy.codeSnippets[selectedCodeFramework]?.code}</code>
+                        </pre>
+                      </div>
+                    )}
+
+                    {activeResultTab === 'wcag' && analysisResult.accessibilityAudit && (
+                      <div className="space-y-4">
+                        <div className={`rounded-2xl border p-5 ${theme.card}`}>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <h3 className="text-base font-bold">WCAG 2.1 Level AA Konformitäts-Audit</h3>
+                            <span className="text-xs text-emerald-400">Konform: {wcagStats.conform} / {wcagStats.total}</span>
+                          </div>
+                          <p className={`mt-1 text-xs ${theme.muted}`}>{analysisResult.accessibilityAudit.riskRationale}</p>
+                          <div className="mt-3 flex flex-wrap gap-1.5">
+                            {['ALLE', 'Wahrnehmbar', 'Bedienbar', 'Verständlich', 'Robust'].map((p) => (
+                              <button
+                                key={p}
+                                onClick={() => setWcagPrincipleFilter(p)}
+                                className={`rounded-lg px-2.5 py-1 text-xs font-semibold ${wcagPrincipleFilter === p ? 'bg-emerald-600 text-white' : theme.subCard}`}
+                              >
+                                {p === 'ALLE' ? 'Alle Prinzipien' : p}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="mt-4 space-y-3">
+                            {filteredWcagChecks.map((chk) => {
+                              const st = wcagCheckStatuses[chk.id] || 'Offen';
+                              return (
+                                <div key={chk.id} className={`rounded-xl border p-3.5 ${theme.subCard}`}>
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div>
+                                      <span className="font-mono text-xs font-bold text-emerald-400">{chk.id}</span> · <span className="text-xs text-indigo-300">{chk.principle} (Level {chk.level})</span>
+                                      <h4 className="text-sm font-bold">{chk.criterion}</h4>
+                                    </div>
+                                    <div className="flex gap-1">
+                                      {['Offen', 'Konform', 'Barriere gefunden'].map((s) => (
+                                        <button
+                                          key={s}
+                                          onClick={() => setWcagCheckStatuses((p) => ({ ...p, [chk.id]: s }))}
+                                          className={`rounded-lg px-2 py-1 text-[11px] ${st === s ? 'bg-emerald-600 text-white' : theme.muted}`}
+                                        >
+                                          {s}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  <p className="mt-2 text-xs"><strong>Prüfschritte:</strong> {chk.howToTest}</p>
+                                  <div className="mt-1.5 rounded-lg bg-emerald-500/10 p-2 text-xs text-emerald-300">
+                                    <strong>Erwartet:</strong> {chk.expectedResult}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        <div className={`overflow-hidden rounded-2xl border ${theme.card}`}>
+                          <div className={`flex items-center justify-between border-b px-4 py-3 ${theme.border}`}>
+                            <span className="text-xs font-bold">Playwright + @axe-core/playwright Audit-Skript</span>
+                            <button
+                              onClick={() => copyToClipboard(analysisResult.accessibilityAudit.automatedA11yCode?.code || '', 'a11y')}
+                              className={`rounded-lg border px-2.5 py-1 text-xs ${theme.subCard}`}
+                            >
+                              {copiedKey === 'a11y' ? 'Kopiert!' : 'Kopieren'}
+                            </button>
+                          </div>
+                          <pre className="overflow-x-auto bg-slate-950 p-4 font-mono text-xs text-slate-200">
+                            <code>{analysisResult.accessibilityAudit.automatedA11yCode?.code}</code>
+                          </pre>
+                        </div>
+                      </div>
+                    )}
+
+                    {activeResultTab === 'tools' && (
+                      <div className={`space-y-4 rounded-2xl border p-5 ${theme.card}`}>
+                        <h3 className="text-base font-bold">Tool-Empfehlungen & Marktvergleich 2026</h3>
+                        {analysisResult.toolRecommendations.map((t, i) => (
+                          <div key={i} className={`rounded-xl border p-4 ${theme.subCard}`}>
+                            <div className="flex justify-between font-bold">
+                              <span>{t.name} ({t.category})</span>
+                              <span className="text-emerald-400">{t.suitabilityScore}%</span>
+                            </div>
+                            <p className="mt-1 text-xs">{t.reasoning}</p>
+                          </div>
+                        ))}
+                        <div className="grid grid-cols-1 gap-3 pt-2 md:grid-cols-2">
+                          {MARKET_AI_TOOLS.map((m, i) => (
+                            <div key={i} className={`rounded-xl border p-3.5 text-xs ${theme.subCard}`}>
+                              <strong>{m.name}</strong> ({m.tag})
+                              <p className={`mt-1 ${theme.muted}`}>{m.comparison}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
